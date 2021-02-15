@@ -15,6 +15,7 @@ var ErrClosedConsumerGroup = errors.New("kafka: tried to use a consumer group th
 // ConsumerGroup is responsible for dividing up processing of topics and partitions
 // over a collection of processes (the members of the consumer group).
 type ConsumerGroup interface {
+
 	// Consume joins a cluster of consumers for a given list of topics and
 	// starts a blocking ConsumerGroupSession through the ConsumerGroupHandler.
 	//
@@ -41,6 +42,8 @@ type ConsumerGroup interface {
 	// This method should be called inside an infinite loop, when a
 	// server-side rebalance happens, the consumer session will need to be
 	// recreated to get the new claims.
+	//
+	//
 	Consume(ctx context.Context, topics []string, handler ConsumerGroupHandler) error
 
 	// Errors returns a read channel of errors that occurred during the consumer life-cycle.
@@ -72,11 +75,14 @@ type consumerGroup struct {
 
 // NewConsumerGroup creates a new consumer group the given broker addresses and configuration.
 func NewConsumerGroup(addrs []string, groupID string, config *Config) (ConsumerGroup, error) {
+
+	// 创建 client 用于更新元数据
 	client, err := NewClient(addrs, config)
 	if err != nil {
 		return nil, err
 	}
 
+	// 创建消费组
 	c, err := newConsumerGroup(groupID, client)
 	if err != nil {
 		_ = client.Close()
@@ -95,16 +101,19 @@ func NewConsumerGroupFromClient(groupID string, client Client) (ConsumerGroup, e
 }
 
 func newConsumerGroup(groupID string, client Client) (ConsumerGroup, error) {
+	// 获取配置信息
 	config := client.Config()
 	if !config.Version.IsAtLeast(V0_10_2_0) {
 		return nil, ConfigurationError("consumer groups require Version to be >= V0_10_2_0")
 	}
 
+	// 创建 Consumer ，它包含消费者的所有核心逻辑。
 	consumer, err := NewConsumerFromClient(client)
 	if err != nil {
 		return nil, err
 	}
 
+	// 创建消费组
 	return &consumerGroup{
 		client:   client,
 		consumer: consumer,
@@ -116,7 +125,9 @@ func newConsumerGroup(groupID string, client Client) (ConsumerGroup, error) {
 }
 
 // Errors implements ConsumerGroup.
-func (c *consumerGroup) Errors() <-chan error { return c.errors }
+func (c *consumerGroup) Errors() <-chan error {
+	return c.errors
+}
 
 // Close implements ConsumerGroup.
 func (c *consumerGroup) Close() (err error) {
@@ -132,6 +143,7 @@ func (c *consumerGroup) Close() (err error) {
 		go func() {
 			close(c.errors)
 		}()
+
 		for e := range c.errors {
 			err = e
 		}
@@ -144,7 +156,15 @@ func (c *consumerGroup) Close() (err error) {
 }
 
 // Consume implements ConsumerGroup.
+//
+// 	检查 ConsumerGroup 是否已关闭
+//	根据 topics 拉取 metadata
+//	初始化 session
+//	启动一个 goroutine 来检查 partition 的变化
+//	等待 session 退出
+//	释放 session
 func (c *consumerGroup) Consume(ctx context.Context, topics []string, handler ConsumerGroupHandler) error {
+
 	// Ensure group is not closed
 	select {
 	case <-c.closed:
@@ -173,6 +193,7 @@ func (c *consumerGroup) Consume(ctx context.Context, topics []string, handler Co
 		return err
 	}
 
+
 	// loop check topic partition numbers changed
 	// will trigger rebalance when any topic partitions number had changed
 	// avoid Consume function called again that will generate more than loopCheckPartitionNumbers coroutine
@@ -180,6 +201,7 @@ func (c *consumerGroup) Consume(ctx context.Context, topics []string, handler Co
 
 	// Wait for session exit signal
 	<-sess.ctx.Done()
+
 
 	// Gracefully release session claims
 	return sess.release(true)
@@ -191,33 +213,41 @@ func (c *consumerGroup) retryNewSession(ctx context.Context, topics []string, ha
 		return nil, ErrClosedConsumerGroup
 	case <-time.After(c.config.Consumer.Group.Rebalance.Retry.Backoff):
 	}
-
 	if refreshCoordinator {
 		err := c.client.RefreshCoordinator(c.groupID)
 		if err != nil {
 			return c.retryNewSession(ctx, topics, handler, retries, true)
 		}
 	}
-
 	return c.newSession(ctx, topics, handler, retries-1)
 }
 
+// newSession 中包含了 Rebalance 相关流程
 func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler ConsumerGroupHandler, retries int) (*consumerGroupSession, error) {
+
+	// 通过 c.groupID 找到 coordinator 对象，如果失败则重试
 	coordinator, err := c.client.Coordinator(c.groupID)
 	if err != nil {
 		if retries <= 0 {
 			return nil, err
 		}
-
 		return c.retryNewSession(ctx, topics, handler, retries, true)
 	}
 
 	// Join consumer group
+	//
+	// 发送 joinGroupRequest 给 coordinator ，若 join 成功，可以得到一个唯一的 memberID
 	join, err := c.joinGroupRequest(coordinator, topics)
 	if err != nil {
 		_ = coordinator.Close()
 		return nil, err
 	}
+
+	// Join 错误检查
+	//  如果 ErrNoError ，意味着请求成功，获取 memberId
+	// 	如果 ErrUnknownMemberId, ErrIllegalGeneration，则立即重试
+	// 	如果 Coordinator 过期，则 backoff 后重试
+	// 	如果 Consumer Group 正在 Rebalance 中，则 backoff 后重试
 	switch join.Err {
 	case ErrNoError:
 		c.memberID = join.MemberId
@@ -228,13 +258,11 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 		if retries <= 0 {
 			return nil, join.Err
 		}
-
 		return c.retryNewSession(ctx, topics, handler, retries, true)
 	case ErrRebalanceInProgress: // retry after backoff
 		if retries <= 0 {
 			return nil, join.Err
 		}
-
 		return c.retryNewSession(ctx, topics, handler, retries, false)
 	default:
 		return nil, join.Err
@@ -242,12 +270,13 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 
 	// Prepare distribution plan if we joined as the leader
 	var plan BalanceStrategyPlan
+
+	// 如果当前客户端被选为 Group Leader，则由它调用 c.balance() 进行 partition 分配，返回 BalanceStrategyPlan 类型的 plan
 	if join.LeaderId == join.MemberId {
 		members, err := join.GetMembers()
 		if err != nil {
 			return nil, err
 		}
-
 		plan, err = c.balance(members)
 		if err != nil {
 			return nil, err
@@ -255,11 +284,17 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 	}
 
 	// Sync consumer group
+	//
+	// 发送 SyncGroupRequest 请求给 coordinator，得到 SyncGroupResponse；
+	// 如果是 group leader，则 plan 参数中携带着自身产出的分配计划；
+	// 如果非 group leader，则 plan 为空；
 	groupRequest, err := c.syncGroupRequest(coordinator, plan, join.GenerationId)
 	if err != nil {
 		_ = coordinator.Close()
 		return nil, err
 	}
+
+	// 错误处理与上面 joinGroupRequest 类似，大致也是重试
 	switch groupRequest.Err {
 	case ErrNoError:
 	case ErrUnknownMemberId, ErrIllegalGeneration: // reset member ID and retry immediately
@@ -282,6 +317,8 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 	}
 
 	// Retrieve and sort claims
+	//
+	// 根据 SyncGroupResponse 中的 claims 列表，得出自己的 claims 表，即每个 topic 对应的 partitionID 的列表；
 	var claims map[string][]int32
 	if len(groupRequest.MemberAssignment) > 0 {
 		members, err := groupRequest.GetMemberAssignment()
@@ -290,12 +327,12 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 		}
 		claims = members.Topics
 		c.userData = members.UserData
-
 		for _, partitions := range claims {
 			sort.Sort(int32Slice(partitions))
 		}
 	}
 
+	// 根据 claims 列表得到 consumerGroupSession；
 	return newConsumerGroupSession(ctx, c, claims, join.MemberId, join.GenerationId, handler)
 }
 
@@ -548,7 +585,26 @@ type consumerGroupSession struct {
 	hbDying, hbDead chan none
 }
 
-func newConsumerGroupSession(ctx context.Context, parent *consumerGroup, claims map[string][]int32, memberID string, generationID int32, handler ConsumerGroupHandler) (*consumerGroupSession, error) {
+// 流程上大致上：
+//	首先初始化 offsetManager；
+//	派生新的 ctx，由该 ctx 控制 Session 的生命周期；
+//	启动 heartbeatLoop()；
+//	为每个 Partition 创建 partitionOffsetManager，简称 POM；
+//	调用 Setup(sess) 执行 Handler 的 Setup 逻辑；
+//	对每个 claim 中的每个 Partition 遍历，执行 sess.consume(topic, partition)；
+//	任意一个 Partition 退出消费，则关闭整个 sess 的 ctx；
+//
+//
+// Session 的生命周期与一次 Consume() 是一致的，Session 若因为任何原因而退出，则应由调用方去重新 Consume()。
+func newConsumerGroupSession(
+	ctx context.Context,
+	parent *consumerGroup,
+	claims map[string][]int32,
+	memberID string,
+	generationID int32,
+	handler ConsumerGroupHandler,
+) (*consumerGroupSession, error) {
+
 	// init offset manager
 	offsets, err := newOffsetManagerFromClient(parent.groupID, memberID, generationID, parent.client)
 	if err != nil {
@@ -647,7 +703,17 @@ func (s *consumerGroupSession) Context() context.Context {
 	return s.ctx
 }
 
+
+
+//
+//
+//
+//
+
+
 func (s *consumerGroupSession) consume(topic string, partition int32) {
+
+
 	// quick exit if rebalance is due
 	select {
 	case <-s.ctx.Done():
@@ -683,6 +749,7 @@ func (s *consumerGroupSession) consume(topic string, partition int32) {
 		case <-s.ctx.Done():
 		case <-s.parent.closed:
 		}
+		// 执行关闭
 		claim.AsyncClose()
 	}()
 
@@ -834,22 +901,30 @@ type consumerGroupClaim struct {
 	PartitionConsumer
 }
 
+
+
 func newConsumerGroupClaim(sess *consumerGroupSession, topic string, partition int32, offset int64) (*consumerGroupClaim, error) {
+
+	//
 	pcm, err := sess.parent.consumer.ConsumePartition(topic, partition, offset)
 	if err == ErrOffsetOutOfRange {
+		//
 		offset = sess.parent.config.Consumer.Offsets.Initial
+		//
 		pcm, err = sess.parent.consumer.ConsumePartition(topic, partition, offset)
 	}
 	if err != nil {
 		return nil, err
 	}
 
+	//
 	go func() {
 		for err := range pcm.Errors() {
 			sess.parent.handleError(err, topic, partition)
 		}
 	}()
 
+	//
 	return &consumerGroupClaim{
 		topic:             topic,
 		partition:         partition,
@@ -864,7 +939,8 @@ func (c *consumerGroupClaim) InitialOffset() int64 { return c.offset }
 
 // Drains messages and errors, ensures the claim is fully closed.
 func (c *consumerGroupClaim) waitClosed() (errs ConsumerErrors) {
-	go func() {
+
+	 go func() {
 		for range c.Messages() {
 		}
 	}()
@@ -872,5 +948,6 @@ func (c *consumerGroupClaim) waitClosed() (errs ConsumerErrors) {
 	for err := range c.Errors() {
 		errs = append(errs, err)
 	}
+
 	return
 }

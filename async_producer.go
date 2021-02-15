@@ -179,10 +179,14 @@ const (
 
 // ProducerMessage is the collection of elements passed to the Producer in order to send a message.
 type ProducerMessage struct {
-	Topic string // The Kafka topic for this message.
+
+	// The Kafka topic for this message.
+	Topic string
+
 	// The partitioning key for this message. Pre-existing Encoders include
 	// StringEncoder and ByteEncoder.
 	Key Encoder
+
 	// The actual message to store in Kafka. Pre-existing Encoders include
 	// StringEncoder and ByteEncoder.
 	Value Encoder
@@ -203,9 +207,11 @@ type ProducerMessage struct {
 	// guaranteed to be defined if the message was successfully delivered and
 	// RequiredAcks is not NoResponse.
 	Offset int64
+
 	// Partition is the partition that the message was sent to. This is only
 	// guaranteed to be defined if the message was successfully delivered.
 	Partition int32
+
 	// Timestamp can vary in behaviour depending on broker configuration, being
 	// in either one of the CreateTime or LogAppendTime modes (default CreateTime),
 	// and requiring version at least 0.10.0.
@@ -221,7 +227,9 @@ type ProducerMessage struct {
 
 	retries        int
 	flags          flagSet
+
 	expectation    chan *ProducerError
+
 	sequenceNumber int32
 	producerEpoch  int16
 	hasSequence    bool

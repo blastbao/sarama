@@ -48,11 +48,14 @@ func (msb *MessageBlock) decode(pd packetDecoder) (err error) {
 	return nil
 }
 
+
+
 type MessageSet struct {
 	PartialTrailingMessage bool // whether the set on the wire contained an incomplete trailing MessageBlock
 	OverflowMessage        bool // whether the set on the wire contained an overflow message
 	Messages               []*MessageBlock
 }
+
 
 func (ms *MessageSet) encode(pe packetEncoder) error {
 	for i := range ms.Messages {

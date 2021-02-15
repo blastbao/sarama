@@ -39,6 +39,7 @@ type syncProducer struct {
 
 // NewSyncProducer creates a new SyncProducer using the given broker addresses and configuration.
 func NewSyncProducer(addrs []string, config *Config) (SyncProducer, error) {
+
 	if config == nil {
 		config = NewConfig()
 		config.Producer.Return.Successes = true
@@ -52,6 +53,7 @@ func NewSyncProducer(addrs []string, config *Config) (SyncProducer, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return newSyncProducerFromAsyncProducer(p.(*asyncProducer)), nil
 }
 
@@ -89,7 +91,9 @@ func verifyProducerConfig(config *Config) error {
 	return nil
 }
 
+// 单条发送
 func (sp *syncProducer) SendMessage(msg *ProducerMessage) (partition int32, offset int64, err error) {
+
 	expectation := make(chan *ProducerError, 1)
 	msg.expectation = expectation
 	sp.producer.Input() <- msg
@@ -101,18 +105,27 @@ func (sp *syncProducer) SendMessage(msg *ProducerMessage) (partition int32, offs
 	return msg.Partition, msg.Offset, nil
 }
 
+// 批量发送
 func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
+
 	expectations := make(chan chan *ProducerError, len(msgs))
+
+	// 启动协程执行异步发送
 	go func() {
 		for _, msg := range msgs {
+			// 创建 msg 的返回值管道
 			expectation := make(chan *ProducerError, 1)
 			msg.expectation = expectation
+			// 异步发送
 			sp.producer.Input() <- msg
+			// 保存 msg 的返回值管道
 			expectations <- expectation
 		}
+		// 完成发送后，关闭 expections 管道，触发下面 for 执行
 		close(expectations)
 	}()
 
+	// 阻塞式等待每个 msg 的 error 并保存
 	var errors ProducerErrors
 	for expectation := range expectations {
 		if err := <-expectation; err != nil {
@@ -120,9 +133,12 @@ func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
 		}
 	}
 
+	// 若出错，则返回
 	if len(errors) > 0 {
 		return errors
 	}
+
+	// 成功
 	return nil
 }
 

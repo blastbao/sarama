@@ -136,10 +136,13 @@ type Config struct {
 		// `topic.metadata.refresh.interval.ms` in the JVM version.
 		RefreshFrequency time.Duration
 
+
 		// Whether to maintain a full set of metadata for all topics, or just
 		// the minimal set that has been necessary so far. The full set is simpler
 		// and usually more convenient, but can take up a substantial amount of
 		// memory if you have many topics and partitions. Defaults to true.
+		//
+		//
 		Full bool
 
 		// How long to wait for a successful metadata response.
@@ -291,12 +294,17 @@ type Config struct {
 		}
 
 		Retry struct {
-			// How long to wait after a failing to read from a partition before
-			// trying again (default 2s).
+
+			// How long to wait after a failing to read from a partition before trying again (default 2s).
+			// 读取分区失败后要等待多长时间才能再次尝试(默认为2s)。
 			Backoff time.Duration
-			// Called to compute backoff time dynamically. Useful for implementing
-			// more sophisticated backoff strategies. This takes precedence over
-			// `Backoff` if set.
+
+			// Called to compute backoff time dynamically.
+			// Useful for implementing more sophisticated backoff strategies.
+			// This takes precedence over `Backoff` if set.
+			//
+			// 用来动态计算回退时间，这对于实施更复杂的退让策略很有用。
+			// 如果设置了 `BackoffFunc` ，它将优先于 `Backoff` 。
 			BackoffFunc func(retries int) time.Duration
 		}
 

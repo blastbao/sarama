@@ -135,8 +135,13 @@ type client struct {
 }
 
 // NewClient creates a new Client. It connects to one of the given broker addresses
-// and uses that broker to automatically fetch metadata on the rest of the kafka cluster. If metadata cannot
-// be retrieved from any of the given broker addresses, the client is not created.
+// and uses that broker to automatically fetch metadata on the rest of the kafka cluster.
+// If metadata cannot be retrieved from any of the given broker addresses, the client is not created.
+//
+//
+//
+// client 用于
+//
 func NewClient(addrs []string, conf *Config) (Client, error) {
 	Logger.Println("Initializing new client")
 
@@ -152,6 +157,7 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 		return nil, ConfigurationError("You must provide at least one broker address")
 	}
 
+	// 构造客户端对象
 	client := &client{
 		conf:                    conf,
 		closer:                  make(chan none),
@@ -163,10 +169,13 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 		coordinators:            make(map[string]int32),
 	}
 
+	// 打乱 addrs 的顺序
 	client.randomizeSeedBrokers(addrs)
 
+	// 是否需要缓存所有 Topic 的元数据
 	if conf.Metadata.Full {
 		// do an initial fetch of all cluster metadata by specifying an empty list of topics
+		// 从 broker 拉取 metadata ，过程中会首先通过 open 创建到 broker 的连接。
 		err := client.RefreshMetadata()
 		switch err {
 		case nil:
@@ -180,10 +189,11 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 			return nil, err
 		}
 	}
+
+	// 启动定时拉取和刷新 metadata 的协程
 	go withRecover(client.backgroundMetadataUpdater)
 
 	Logger.Println("Successfully initialized new client")
-
 	return client, nil
 }
 
@@ -306,8 +316,10 @@ func (client *client) Partitions(topic string) ([]int32, error) {
 		return nil, ErrClosedClient
 	}
 
+	// 从本地缓存拉取
 	partitions := client.cachedPartitions(topic, allPartitions)
 
+	// 本地缓存不存在，则先刷新本地缓存，再从缓存中获取
 	if len(partitions) == 0 {
 		err := client.RefreshMetadata(topic)
 		if err != nil {
@@ -317,10 +329,12 @@ func (client *client) Partitions(topic string) ([]int32, error) {
 	}
 
 	// no partitions found after refresh metadata
+	// 没有数据，报错
 	if len(partitions) == 0 {
 		return nil, ErrUnknownTopicOrPartition
 	}
 
+	// 返回数据
 	return partitions, nil
 }
 
@@ -428,12 +442,15 @@ func (client *client) OfflineReplicas(topic string, partitionID int32) ([]int32,
 }
 
 func (client *client) Leader(topic string, partitionID int32) (*Broker, error) {
+
 	if client.Closed() {
 		return nil, ErrClosedClient
 	}
 
+	// 从缓存中获取 topic/partition 的 leader broker 对象
 	leader, err := client.cachedLeader(topic, partitionID)
 
+	// 如果缓存为空，则回源刷新缓存，再重试从缓存中获取
 	if leader == nil {
 		err = client.RefreshMetadata(topic)
 		if err != nil {
@@ -466,7 +483,11 @@ func (client *client) RefreshBrokers(addrs []string) error {
 	return nil
 }
 
+
+// 刷新本地缓存的 Metadata 元数据
 func (client *client) RefreshMetadata(topics ...string) error {
+
+	// 已关闭
 	if client.Closed() {
 		return ErrClosedClient
 	}
@@ -474,16 +495,21 @@ func (client *client) RefreshMetadata(topics ...string) error {
 	// Prior to 0.8.2, Kafka will throw exceptions on an empty topic and not return a proper
 	// error. This handles the case by returning an error instead of sending it
 	// off to Kafka. See: https://github.com/Shopify/sarama/pull/38#issuecomment-26362310
+	//
+	// 参数检查，不能接受空 topic
 	for _, topic := range topics {
 		if len(topic) == 0 {
 			return ErrInvalidTopic // this is the error that 0.8.2 and later correctly return
 		}
 	}
 
+	// 超时控制
 	deadline := time.Time{}
 	if client.conf.Metadata.Timeout > 0 {
 		deadline = time.Now().Add(client.conf.Metadata.Timeout)
 	}
+
+	// 刷新本地缓存的 Metadata 元数据
 	return client.tryRefreshMetadata(topics, client.conf.Metadata.Retry.Max, deadline)
 }
 
@@ -492,8 +518,8 @@ func (client *client) GetOffset(topic string, partitionID int32, time int64) (in
 		return -1, ErrClosedClient
 	}
 
+	// 请求 broker 查询 offset ，若查询出错，刷新元数据缓存后再重试一次
 	offset, err := client.getOffset(topic, partitionID, time)
-
 	if err != nil {
 		if err := client.RefreshMetadata(topic); err != nil {
 			return -1, err
@@ -513,6 +539,7 @@ func (client *client) Controller() (*Broker, error) {
 		return nil, ErrUnsupportedVersion
 	}
 
+	// 根据 client.controllerID 获取缓存的 broker 对象，若获取失败，刷新元数据缓存后再重试一次
 	controller := client.cachedController()
 	if controller == nil {
 		if err := client.refreshMetadata(); err != nil {
@@ -525,6 +552,7 @@ func (client *client) Controller() (*Broker, error) {
 		return nil, ErrControllerNotAvailable
 	}
 
+	// 获取 controller 成功，则打开连接并返回
 	_ = controller.Open(client.conf)
 	return controller, nil
 }
@@ -598,7 +626,8 @@ func (client *client) RefreshCoordinator(consumerGroup string) error {
 }
 
 // private broker management helpers
-
+//
+// 打乱 addrs 的顺序
 func (client *client) randomizeSeedBrokers(addrs []string) {
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for _, index := range random.Perm(len(addrs)) {
@@ -652,6 +681,7 @@ func (client *client) registerBroker(broker *Broker) {
 // deregisterBroker removes a broker from the seedsBroker list, and if it's
 // not the seedbroker, removes it from brokers map completely.
 func (client *client) deregisterBroker(broker *Broker) {
+
 	client.lock.Lock()
 	defer client.lock.Unlock()
 
@@ -677,17 +707,20 @@ func (client *client) resurrectDeadBrokers() {
 	client.deadSeeds = nil
 }
 
+// 选择一个可用的 broker
 func (client *client) any() *Broker {
 	client.lock.RLock()
 	defer client.lock.RUnlock()
 
+	// 如果设置了 seedBrokers ，那么就取出并打开 seedBroker
 	if len(client.seedBrokers) > 0 {
 		_ = client.seedBrokers[0].Open(client.conf)
 		return client.seedBrokers[0]
 	}
 
+	// 如果未设置 seedBrokers ，就随机性选择其它的 broker ，这些 broker 可能是通过刷新元数据获取到的。
 	// not guaranteed to be random *or* deterministic
-	for _, broker := range client.brokers {
+	for _, broker := range client.brokers { // range map 不能保证是随机的或确定性的
 		_ = broker.Open(client.conf)
 		return broker
 	}
@@ -752,20 +785,26 @@ func (client *client) setPartitionCache(topic string, partitionSet partitionType
 }
 
 func (client *client) cachedLeader(topic string, partitionID int32) (*Broker, error) {
+
 	client.lock.RLock()
 	defer client.lock.RUnlock()
 
+	// 取出 topic 的元数据
 	partitions := client.metadata[topic]
 	if partitions != nil {
+		// 取出 partition 的元数据
 		metadata, ok := partitions[partitionID]
 		if ok {
+			// 状态检查
 			if metadata.Err == ErrLeaderNotAvailable {
 				return nil, ErrLeaderNotAvailable
 			}
+			// 根据 broker id 获取缓存的 broker 对象
 			b := client.brokers[metadata.Leader]
 			if b == nil {
 				return nil, ErrLeaderNotAvailable
 			}
+			// 获取&创建同 broker 的连接，并返回
 			_ = b.Open(client.conf)
 			return b, nil
 		}
@@ -775,23 +814,28 @@ func (client *client) cachedLeader(topic string, partitionID int32) (*Broker, er
 }
 
 func (client *client) getOffset(topic string, partitionID int32, time int64) (int64, error) {
+
+	// 获取 topic/partition 的 leader broker 对象
 	broker, err := client.Leader(topic, partitionID)
 	if err != nil {
 		return -1, err
 	}
 
+	// 构造请求
 	request := &OffsetRequest{}
 	if client.conf.Version.IsAtLeast(V0_10_1_0) {
 		request.Version = 1
 	}
 	request.AddBlock(topic, partitionID, time, 1)
 
+	// 发送请求
 	response, err := broker.GetAvailableOffsets(request)
 	if err != nil {
 		_ = broker.Close()
 		return -1, err
 	}
 
+	// 解析响应
 	block := response.GetBlock(topic, partitionID)
 	if block == nil {
 		_ = broker.Close()
@@ -804,6 +848,7 @@ func (client *client) getOffset(topic string, partitionID int32, time int64) (in
 		return -1, ErrOffsetOutOfRange
 	}
 
+	// 返回结果
 	return block.Offsets[0], nil
 }
 
@@ -832,6 +877,7 @@ func (client *client) backgroundMetadataUpdater() {
 }
 
 func (client *client) refreshMetadata() error {
+
 	var topics []string
 
 	if !client.conf.Metadata.Full {
@@ -851,7 +897,11 @@ func (client *client) refreshMetadata() error {
 	return nil
 }
 
+
+// 刷新本地缓存的 Metadata 元数据
 func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int, deadline time.Time) error {
+
+	// 过期检查
 	pastDeadline := func(backoff time.Duration) bool {
 		if !deadline.IsZero() && time.Now().Add(backoff).After(deadline) {
 			// we are past the deadline
@@ -859,61 +909,82 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 		}
 		return false
 	}
+
+	// 重试机制
+	// 当发生不需 retry 的 error 时，本函数直接 return ；
+	// 当发生需要 retry 的 error 时，本函数调用 retry ，retry 里封装了重试的策略以及次数等。
 	retry := func(err error) error {
+		// 如果剩余重试次数大于 0 ，则继续重试
 		if attemptsRemaining > 0 {
+			// 执行退让算法
 			backoff := client.computeBackoff(attemptsRemaining)
 			if pastDeadline(backoff) {
 				Logger.Println("client/metadata skipping last retries as we would go past the metadata timeout")
 				return err
 			}
 			Logger.Printf("client/metadata retrying after %dms... (%d attempts remaining)\n", backoff/time.Millisecond, attemptsRemaining)
+			// 等待
 			if backoff > 0 {
 				time.Sleep(backoff)
 			}
+			// [递归调用] 重试次数 -1 后进入重试
 			return client.tryRefreshMetadata(topics, attemptsRemaining-1, deadline)
 		}
 		return err
 	}
 
+	// 选择一个可用的 broker
 	broker := client.any()
+
+	//
 	for ; broker != nil && !pastDeadline(0); broker = client.any() {
+
+		// 如果 topic 不存在，就自动创建
 		allowAutoTopicCreation := true
 		if len(topics) > 0 {
 			Logger.Printf("client/metadata fetching metadata for %v from broker %s\n", topics, broker.addr)
 		} else {
+			// 如果未指定 topics 则拉取所有 topics 元数据，此时需要关闭 topic 的自动创建
 			allowAutoTopicCreation = false
 			Logger.Printf("client/metadata fetching metadata for all topics from broker %s\n", broker.addr)
 		}
 
-		req := &MetadataRequest{Topics: topics, AllowAutoTopicCreation: allowAutoTopicCreation}
+		// 构造获取元数据请求
+		req := &MetadataRequest{
+			Topics: topics,										// topics 列表
+			AllowAutoTopicCreation: allowAutoTopicCreation,  	// 是否允许创建不存在的 topic
+		}
 		if client.conf.Version.IsAtLeast(V1_0_0_0) {
 			req.Version = 5
 		} else if client.conf.Version.IsAtLeast(V0_10_0_0) {
 			req.Version = 1
 		}
+
+		// 执行请求，获取返回值
 		response, err := broker.GetMetadata(req)
 		switch err.(type) {
+		// 请求成功，更新本地的元数据缓存
 		case nil:
 			allKnownMetaData := len(topics) == 0
 			// valid response, use it
+			// 更新元数据
 			shouldRetry, err := client.updateMetadata(response, allKnownMetaData)
 			if shouldRetry {
 				Logger.Println("client/metadata found some partitions to be leaderless")
 				return retry(err) // note: err can be nil
 			}
 			return err
-
+		// 编码错误，不可重试，直接返回
 		case PacketEncodingError:
 			// didn't even send, return the error
 			return err
-
+		// 鉴权错误
 		case KError:
 			// if SASL auth error return as this _should_ be a non retryable err for all brokers
 			if err.(KError) == ErrSASLAuthenticationFailed {
 				Logger.Println("client/metadata failed SASL authentication")
 				return err
 			}
-
 			if err.(KError) == ErrTopicAuthorizationFailed {
 				Logger.Println("client is not authorized to access this topic. The topics were: ", topics)
 				return err
@@ -922,7 +993,7 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 			Logger.Printf("client/metadata got error from broker %d while fetching metadata: %v\n", broker.ID(), err)
 			_ = broker.Close()
 			client.deregisterBroker(broker)
-
+		// 其它错误，重试
 		default:
 			// some other error, remove that broker and try again
 			Logger.Printf("client/metadata got error from broker %d while fetching metadata: %v\n", broker.ID(), err)
@@ -946,15 +1017,22 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 	if client.Closed() {
 		return
 	}
-
 	client.lock.Lock()
 	defer client.lock.Unlock()
+
+	// 1. 首先对本地缓存的 broker 元信息进行更新。
 
 	// For all the brokers we received:
 	// - if it is a new ID, save it
 	// - if it is an existing ID, but the address we have is stale, discard the old one and save it
 	// - if some brokers is not exist in it, remove old broker
 	// - otherwise ignore it, replacing our existing one would just bounce the connection
+	//
+	//
+	// 假设返回了新的 broker id ，那么保存这些新的 broker ，这意味着增加了 broker、或者下线的 broker 重新上线了。
+	// 如果返回的 id 我们已经保存了，但是地址变化了，那么更新地址；
+	// 如果本地保存的一些 id 没有返回，说明这些 broker 下线了，那么删除他们。
+	//
 	client.updateBroker(data.Brokers)
 
 	client.controllerID = data.ControllerID
@@ -964,7 +1042,11 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 		client.metadataTopics = make(map[string]none)
 		client.cachedPartitionsResults = make(map[string][maxPartitionIndex][]int32)
 	}
+
+	// 2. 然后对本地缓存的 topic 元信息进行更新，主要是更新 topic 以及 topic 对应的 partition 。
 	for _, topic := range data.Topics {
+
+
 		// topics must be added firstly to `metadataTopics` to guarantee that all
 		// requested topics must be recorded to keep them trackable for periodically
 		// metadata refresh.
@@ -992,6 +1074,7 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 			continue
 		}
 
+		// 更新每个 topic 以及对应的 partition
 		client.metadata[topic.Name] = make(map[int32]*PartitionMetadata, len(topic.Partitions))
 		for _, partition := range topic.Partitions {
 			client.metadata[topic.Name][partition.ID] = partition
@@ -1000,6 +1083,7 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 			}
 		}
 
+		//
 		var partitionCache [maxPartitionIndex][]int32
 		partitionCache[allPartitions] = client.setPartitionCache(topic.Name, allPartitions)
 		partitionCache[writablePartitions] = client.setPartitionCache(topic.Name, writablePartitions)
@@ -1035,6 +1119,7 @@ func (client *client) computeBackoff(attemptsRemaining int) time.Duration {
 }
 
 func (client *client) getConsumerMetadata(consumerGroup string, attemptsRemaining int) (*FindCoordinatorResponse, error) {
+
 	retry := func(err error) (*FindCoordinatorResponse, error) {
 		if attemptsRemaining > 0 {
 			backoff := client.computeBackoff(attemptsRemaining)

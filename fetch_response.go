@@ -35,7 +35,7 @@ type FetchResponseBlock struct {
 	LastStableOffset     int64
 	LogStartOffset       int64
 	AbortedTransactions  []*AbortedTransaction
-	PreferredReadReplica int32
+	PreferredReadReplica int32		//
 	Records              *Records // deprecated: use FetchResponseBlock.RecordsSet
 	RecordsSet           []*Records
 	Partial              bool
@@ -369,6 +369,7 @@ func (r *FetchResponse) requiredVersion() KafkaVersion {
 }
 
 func (r *FetchResponse) GetBlock(topic string, partition int32) *FetchResponseBlock {
+
 	if r.Blocks == nil {
 		return nil
 	}

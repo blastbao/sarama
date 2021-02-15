@@ -23,16 +23,17 @@ type Broker struct {
 
 	id            int32
 	addr          string
-	correlationID int32
+	correlationID int32			// 因为请求是异步发送的，通过 correlationID 来关联 req 和 response
 	conn          net.Conn
 	connErr       error
 	lock          sync.Mutex
 	opened        int32
 	responses     chan responsePromise
-	done          chan bool
+	done          chan bool	// 在 tcp 连接创建完成后，会创建本管道
 
 	registeredMetrics []string
 
+	// metrics
 	incomingByteRate       metrics.Meter
 	requestRate            metrics.Meter
 	requestSize            metrics.Histogram
@@ -135,15 +136,42 @@ func NewBroker(addr string) *Broker {
 // block waiting for the connection to succeed or fail. To get the effect of a fully synchronous Open call,
 // follow it by a call to Connected(). The only errors Open will return directly are ConfigurationError or
 // AlreadyConnected. If conf is nil, the result of NewConfig() is used.
+//
+//
+// Open 尝试连接到 Broker 如果 Broker 尚未连接或正在连接，但不会阻塞等待连接完成。
+//
+// 这意味着 Broker 上的任何后续操作都将阻塞，等待连接成功或失败。
+//
+// 要获得完全同步 Open 调用的效果，在它之后再调用 Connected() 。
+//
+// 打开时直接返回的错误只有 ConfigurationError 或 AlreadyConnected 。
+//
+// 如果 conf 为 nil ，则使用 NewConfig() 创建默认配置对象。
+//
+//
+//
+// Open 异步的建立了一个 tcp 连接，然后创建了一个缓冲大小为 MaxOpenRequests 的 responses 管道 ，
+// 这个 MaxOpenRequests 参数可以理解为 Java 客户端中的 max.in.flight.requests.per.connection 。
+// 这个 responses 管道用于接收从 broker 发送回来的消息。
+//
+//
+//
+//
+// 在调用 NewClient() 时，
+//
 func (b *Broker) Open(conf *Config) error {
+
+	// 是否已经连接
 	if !atomic.CompareAndSwapInt32(&b.opened, 0, 1) {
 		return ErrAlreadyConnected
 	}
 
+	// 配置为空，创建默认配置
 	if conf == nil {
 		conf = NewConfig()
 	}
 
+	// 合法性检查
 	err := conf.Validate()
 	if err != nil {
 		return err
@@ -151,9 +179,11 @@ func (b *Broker) Open(conf *Config) error {
 
 	b.lock.Lock()
 
+	// 启动协程异步创建连接，避免阻塞
 	go withRecover(func() {
 		defer b.lock.Unlock()
 
+		// 建立 tcp 连接
 		dialer := conf.getDialer()
 		b.conn, b.connErr = dialer.Dial("tcp", b.addr)
 		if b.connErr != nil {
@@ -166,6 +196,7 @@ func (b *Broker) Open(conf *Config) error {
 			b.conn = tls.Client(b.conn, validServerNameTLS(b.addr, conf.Net.TLS.Config))
 		}
 
+		// 为 tcp 连接封装 buffer
 		b.conn = newBufConn(b.conn)
 		b.conf = conf
 
@@ -186,7 +217,6 @@ func (b *Broker) Open(conf *Config) error {
 
 		if conf.Net.SASL.Enable {
 			b.connErr = b.authenticateViaSASL()
-
 			if b.connErr != nil {
 				err = b.conn.Close()
 				if err == nil {
@@ -200,7 +230,9 @@ func (b *Broker) Open(conf *Config) error {
 			}
 		}
 
+		// 连接建立完成后，创建 done 管道，在 close 时会用来同步信号。
 		b.done = make(chan bool)
+		// 创建管道，用于接收 broker 发来的消息
 		b.responses = make(chan responsePromise, b.conf.Net.MaxOpenRequests-1)
 
 		if b.id >= 0 {
@@ -208,6 +240,8 @@ func (b *Broker) Open(conf *Config) error {
 		} else {
 			Logger.Printf("Connected to broker at %s (unregistered)\n", b.addr)
 		}
+
+		// 启动协程，用于接收消息
 		go withRecover(b.responseReceiver)
 	})
 
@@ -278,6 +312,7 @@ func (b *Broker) Rack() string {
 
 //GetMetadata send a metadata request and returns a metadata response or error
 func (b *Broker) GetMetadata(request *MetadataRequest) (*MetadataResponse, error) {
+
 	response := new(MetadataResponse)
 
 	err := b.sendAndReceive(request, response)
@@ -712,31 +747,38 @@ func (b *Broker) write(buf []byte) (n int, err error) {
 	return b.conn.Write(buf)
 }
 
+// send 把消息通过 tcp 连接同步地发送到 broker 中。
 func (b *Broker) send(rb protocolBody, promiseResponse bool, responseHeaderVersion int16) (*responsePromise, error) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
+	// 参数检查
 	if b.conn == nil {
 		if b.connErr != nil {
 			return nil, b.connErr
 		}
 		return nil, ErrNotConnected
 	}
-
 	if !b.conf.Version.IsAtLeast(rb.requiredVersion()) {
 		return nil, ErrUnsupportedVersion
 	}
 
-	req := &request{correlationID: b.correlationID, clientID: b.conf.ClientID, body: rb}
+	// 构造消息请求
+	req := &request{
+		correlationID: b.correlationID,	// 通过 correlationID 来关联 req 和 response
+		clientID: b.conf.ClientID,
+		body: rb,
+	}
 	buf, err := encode(req, b.conf.MetricRegistry)
 	if err != nil {
 		return nil, err
 	}
 
+	// 发送请求到 tcp 连接中
 	requestTime := time.Now()
 	// Will be decremented in responseReceiver (except error or request with NoResponse)
 	b.addRequestInFlightMetrics(1)
-	bytes, err := b.write(buf)
+	bytes, err := b.write(buf) // 底层会调用 `b.conn.Write`
 	b.updateOutgoingCommunicationMetrics(bytes)
 	if err != nil {
 		b.addRequestInFlightMetrics(-1)
@@ -744,33 +786,50 @@ func (b *Broker) send(rb protocolBody, promiseResponse bool, responseHeaderVersi
 	}
 	b.correlationID++
 
+	// 如果 promiseResponse 为 nil ，意味着不关心 broker 的响应，直接返回。
 	if !promiseResponse {
 		// Record request latency without the response
 		b.updateRequestLatencyAndInFlightMetrics(time.Since(requestTime))
 		return nil, nil
 	}
 
-	promise := responsePromise{requestTime, req.correlationID, responseHeaderVersion, make(chan []byte), make(chan error)}
+	// 构建一个接收返回值的对象 ，其中包含两个 channel ，一个用来接收响应，一个用来接收错误
+	promise := responsePromise{
+		requestTime: requestTime,				// 请求时间
+		correlationID: req.correlationID,		// [重要] 通过 correlationID 来关联 req 和 response
+		headerVersion: responseHeaderVersion,	// 版本号
+		packets: make(chan []byte),				// 数据管道
+		errors: make(chan error),				// 错误管道
+	}
+
+	// [核心]
+	// 把此对象写入 responses 管道中，在 responseReceiver 协程中会监听此管道，并等待响应数据到达，
+	// 当 broker 返回数据或错误时，responseReceiver 协程会将其写入到 promise.packets 或 promise.errors 中。
 	b.responses <- promise
 
+	// 返回对象指针，便于 sendAndReceive 中同步等待消息响应
 	return &promise, nil
 }
 
 func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
+
 	responseHeaderVersion := int16(-1)
 	if res != nil {
 		responseHeaderVersion = res.headerVersion()
 	}
 
+	// 发送消息到 broker ，获得 promise 对象，后台协程 responseReceiver 在收到 broker 响应时，会通过 promise 通知调用者。
 	promise, err := b.send(req, res != nil, responseHeaderVersion)
 	if err != nil {
 		return err
 	}
 
+	// 当配置 `RequiredAcks`=0 时，即不关注 server(broker) 返回，返回的 promise 会是 nil ，直接 return
 	if promise == nil {
 		return nil
 	}
 
+	// 等待 broker 响应
 	select {
 	case buf := <-promise.packets:
 		return versionedDecode(buf, res, req.version())
@@ -780,6 +839,7 @@ func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
 }
 
 func (b *Broker) decode(pd packetDecoder, version int16) (err error) {
+
 	b.id, err = pd.getInt32()
 	if err != nil {
 		return err
@@ -840,10 +900,15 @@ func (b *Broker) encode(pe packetEncoder, version int16) (err error) {
 	return nil
 }
 
+
+// 本函数是在 Broker.Open() 中以后台协程启动的。
 func (b *Broker) responseReceiver() {
 	var dead error
 
+
+	// 循环读取消息，直到有人关闭了这个 channel ，这个管道的数据是通过 send 写入的。
 	for response := range b.responses {
+
 		if dead != nil {
 			// This was previously incremented in send() and
 			// we are not calling updateIncomingCommunicationMetrics()
@@ -852,10 +917,14 @@ func (b *Broker) responseReceiver() {
 			continue
 		}
 
+		// 根据版本获取 Header 长度
 		var headerLength = getHeaderLength(response.headerVersion)
 		header := make([]byte, headerLength)
 
+		// 读取 header
 		bytesReadHeader, err := b.readFull(header)
+
+		// 延迟上报
 		requestLatency := time.Since(response.requestTime)
 		if err != nil {
 			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
@@ -864,6 +933,7 @@ func (b *Broker) responseReceiver() {
 			continue
 		}
 
+		// 解析 header
 		decodedHeader := responseHeader{}
 		err = versionedDecode(header, &decodedHeader, response.headerVersion)
 		if err != nil {
@@ -872,6 +942,8 @@ func (b *Broker) responseReceiver() {
 			response.errors <- err
 			continue
 		}
+
+		// 这里会校验收到的消息是否是所期待的，若对不上直接抛弃，继续处理下一条。
 		if decodedHeader.correlationID != response.correlationID {
 			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
 			// TODO if decoded ID < cur ID, discard until we catch up
@@ -881,8 +953,11 @@ func (b *Broker) responseReceiver() {
 			continue
 		}
 
+		// 读取 body
 		buf := make([]byte, decodedHeader.length-int32(headerLength)+4)
 		bytesReadBody, err := b.readFull(buf)
+
+		// 延迟上报
 		b.updateIncomingCommunicationMetrics(bytesReadHeader+bytesReadBody, requestLatency)
 		if err != nil {
 			dead = err
@@ -890,8 +965,10 @@ func (b *Broker) responseReceiver() {
 			continue
 		}
 
+		// 把 body 内容写入 response.packets 管道，以通知发送者
 		response.packets <- buf
 	}
+
 	close(b.done)
 }
 

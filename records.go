@@ -144,6 +144,7 @@ func (r *Records) isPartial() (bool, error) {
 }
 
 func (r *Records) isControl() (bool, error) {
+
 	if r.recordsType == unknownRecords {
 		if empty, err := r.setTypeFromFields(); err != nil || empty {
 			return false, err
