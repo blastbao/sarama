@@ -232,7 +232,7 @@ func (b *Broker) Open(conf *Config) error {
 
 		// 连接建立完成后，创建 done 管道，在 close 时会用来同步信号。
 		b.done = make(chan bool)
-		// 创建管道，用于接收 broker 发来的消息
+		// 创建一个缓冲大小为 MaxOpenRequests 的管道，用于接收 broker 发来的消息
 		b.responses = make(chan responsePromise, b.conf.Net.MaxOpenRequests-1)
 
 		if b.id >= 0 {

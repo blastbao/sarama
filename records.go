@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	unknownRecords = iota
-	legacyRecords
+	legacyRecords		// 如果版本 >=2 则调用 DefaultRecord 进行写数据，否则使用 LegacyRecord 进行写数据
 	defaultRecords
 
 	magicOffset = 16
@@ -13,8 +13,8 @@ const (
 // Records implements a union type containing either a RecordBatch or a legacy MessageSet.
 type Records struct {
 	recordsType int
-	MsgSet      *MessageSet
-	RecordBatch *RecordBatch
+	MsgSet      *MessageSet		// v1
+	RecordBatch *RecordBatch	// v2
 }
 
 func newLegacyRecords(msgSet *MessageSet) Records {

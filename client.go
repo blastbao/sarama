@@ -12,7 +12,13 @@ import (
 // automatically when it passes out of scope. It is safe to share a client amongst many
 // users, however Kafka will process requests from a single client strictly in serial,
 // so it is generally more efficient to use the default one client per producer/consumer.
+//
+// Client 是一个通用的 Kafka 客户端，它管理到一个或多个 Kafka broker 的连接。
+// 必须在 Client 上调用 Close() 以避免泄漏，因为当它超出作用域时，不会自动进行垃圾收集。
+// Client 是协程安全的，多用户可以共享一个 Client ，但是 Kafka 会严格地以串行的方式处理来自单个 Client 的请求，
+// 所以使用独立的 Client 往往是更高效的。
 type Client interface {
+
 	// Config returns the Config struct of the client. This struct should not be
 	// altered after it has been created.
 	Config() *Config
@@ -627,8 +633,10 @@ func (client *client) RefreshCoordinator(consumerGroup string) error {
 
 // private broker management helpers
 //
-// 打乱 addrs 的顺序
+// 打乱用户输入的 addrs 的顺序，保存到 seedBrokers 中
 func (client *client) randomizeSeedBrokers(addrs []string) {
+	// 把用户输入的 broker 地址作为 “种子broker” 增加到 seedBrokers 中
+	// 随后客户端会根据已有的 broker 地址，自动刷新元数据，以获取更多的 broker 地址，所以称之为种子
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for _, index := range random.Perm(len(addrs)) {
 		client.seedBrokers = append(client.seedBrokers, NewBroker(addrs[index]))
@@ -712,7 +720,7 @@ func (client *client) any() *Broker {
 	client.lock.RLock()
 	defer client.lock.RUnlock()
 
-	// 如果设置了 seedBrokers ，那么就取出并打开 seedBroker
+	// 如果设置了 seedBrokers ，那么就取出并打开 seedBroker （这些 seedBrokers 是用户传入的）
 	if len(client.seedBrokers) > 0 {
 		_ = client.seedBrokers[0].Open(client.conf)
 		return client.seedBrokers[0]
@@ -857,6 +865,8 @@ func (client *client) getOffset(topic string, partitionID int32, time int64) (in
 func (client *client) backgroundMetadataUpdater() {
 	defer close(client.closed)
 
+
+	// 按照配置的时间间隔更新元数据
 	if client.conf.Metadata.RefreshFrequency == time.Duration(0) {
 		return
 	}
@@ -864,6 +874,7 @@ func (client *client) backgroundMetadataUpdater() {
 	ticker := time.NewTicker(client.conf.Metadata.RefreshFrequency)
 	defer ticker.Stop()
 
+	// 执行定时更新操作
 	for {
 		select {
 		case <-ticker.C:
@@ -876,6 +887,7 @@ func (client *client) backgroundMetadataUpdater() {
 	}
 }
 
+// 判断需要刷新哪些主题的元数据，还是说要刷新全部主题的元数据。
 func (client *client) refreshMetadata() error {
 
 	var topics []string

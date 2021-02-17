@@ -70,14 +70,12 @@ type Consumer interface {
 	// 此方法与 Client.Topics() 相同，是为了方便而提供的。
 	Topics() ([]string, error)
 
-
 	// Partitions returns the sorted list of all partition IDs for the given topic.
 	// This method is the same as Client.Partitions(), and is provided for convenience.
 	//
 	// Partitions() 返回给定 Topic 的所有分区 id 的有序列表。
 	// 此方法与 Client.Partitions() 相同，是为了方便而提供的。
 	Partitions(topic string) ([]int32, error)
-
 
 	// ConsumePartition creates a PartitionConsumer on the given topic/partition with
 	// the given offset. It will return an error if this Consumer is already consuming
@@ -99,7 +97,6 @@ type Consumer interface {
 }
 
 
-
 // 是 Consumer 接口的实现类，包含消费者的所有核心逻辑。
 //
 type consumer struct {
@@ -109,7 +106,6 @@ type consumer struct {
 	client          Client									// [核心]
 	lock            sync.Mutex
 }
-
 
 // NewConsumer creates a new consumer using the given broker addresses and configuration.
 func NewConsumer(addrs []string, config *Config) (Consumer, error) {
@@ -163,9 +159,9 @@ func (c *consumer) Partitions(topic string) ([]int32, error) {
 //
 // 	构造 partitionConsumer 对象
 // 	获取待消费的 offset ，保存到 partitionConsumer.offset 上
-// 	把 partitionConsumer 对象保存到 c.children[topic][partition] 上
-//  启动协程:
-//  启动协程:
+// 	把 partitionConsumer 对象保存到 consumer.children[topic][partition] 上
+//  启动 dispatcher 协程: 监听 brokerConsumer 的异常
+//  启动 responseFeeder 协程: 监听 brokerConsumer 返回的数据
 //	获取 topic/partition 的 leader broker 对象 (顺序调整)
 //  获取 leader broker 对应的 brokerConsumer ，若不存在则创建
 //  把 partitionConsumer 对象注册到 brokerConsumer ，接收 topic/partition 消息的回调
@@ -221,6 +217,8 @@ func (c *consumer) HighWaterMarks() map[string]map[int32]int64 {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	// topic/partition => offset
+
 	hwms := make(map[string]map[int32]int64)
 	for topic, p := range c.children {
 		hwm := make(map[int32]int64, len(p))
@@ -269,7 +267,7 @@ func (c *consumer) refBrokerConsumer(broker *Broker) *brokerConsumer {
 	// 每个 broker 对应一个 brokerConsumer ，不同 partition/topic 对应一个 leader broker ，通过引用计数维护。
 	bc := c.brokerConsumers[broker]
 	if bc == nil {
-		bc = c.newBrokerConsumer(broker)
+		bc = c.newBrokerConsumer(broker)	// 不存在则创建
 		c.brokerConsumers[broker] = bc
 	}
 
@@ -283,8 +281,10 @@ func (c *consumer) unrefBrokerConsumer(brokerWorker *brokerConsumer) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	// 减引用
 	brokerWorker.refs--
 
+	// 如果引用计数为 0 则关闭 brokerConsumer 并从 c.brokerConsumers[] 中清理它
 	if brokerWorker.refs == 0 {
 		close(brokerWorker.input)
 		if c.brokerConsumers[brokerWorker.broker] == brokerWorker {
@@ -433,9 +433,7 @@ func (child *partitionConsumer) computeBackoff() time.Duration {
 }
 
 //
-//
-//
-//
+// 如果从 broker 拉取消息出现错误，会触发 child.trigger 管道，执行 broker 的重新选择和加入订阅。
 //
 func (child *partitionConsumer) dispatcher() {
 
@@ -645,12 +643,12 @@ feederLoop:
 
 				// 如果 `firstAttempt` 为 false ，意味着首次写入失败，且等待 100ms 后仍未写成功
 				if !firstAttempt {
-					// 设置错误
-					child.responseResult = errTimedOut
+					// 设置超时错误，后面 brokerConsumer 得到错误后会解除订阅关系，停止拉取和投递本 child 的消息。
+					child.responseResult = errTimedOut // 用户迟迟没有从 child.messages 管道中读取消息
 					// 解除 brokerConsumer 阻塞
 					child.broker.acks.Done()
 
-					// 当前处理到第 i 条消息，对剩余的每条消息进行处理
+					// 当前处理到第 i 条消息，对剩余的每条消息进行处理，注意，这里是阻塞式的写管道操作
 				remainingLoop:
 					for _, msg = range msgs[i:] {
 						select {
@@ -660,7 +658,7 @@ feederLoop:
 						}
 					}
 
-					// 将 partitionConsumer 重新加入 brokerConsumer 的订阅
+					// 如果写入消息成功，重新将 partitionConsumer 加入 brokerConsumer 的订阅
 					child.broker.input <- child
 					continue feederLoop
 
@@ -673,13 +671,11 @@ feederLoop:
 			}
 		}
 
-		// 解除 brokerConsumer 阻塞
+		// 解除 brokerConsumer 阻塞式等待
 		child.broker.acks.Done()
 	}
 
-
 	// 运行至此，意味着 dispatcher 协程已经执行完 close(child.feeder) 并退出。
-
 
 	// 关闭超时定时器
 	expiryTicker.Stop()
@@ -691,17 +687,13 @@ feederLoop:
 
 func (child *partitionConsumer) parseMessages(msgSet *MessageSet) ([]*ConsumerMessage, error) {
 
-
 	var messages []*ConsumerMessage
 
-
 	for _, msgBlock := range msgSet.Messages {
-
-
 		for _, msg := range msgBlock.Messages() {
-
-
+			// 消息偏移量
 			offset := msg.Offset
+			// 消息时间戳
 			timestamp := msg.Msg.Timestamp
 			if msg.Msg.Version >= 1 {
 				baseOffset := msgBlock.Offset - msgBlock.Messages()[len(msgBlock.Messages())-1].Offset
@@ -710,11 +702,11 @@ func (child *partitionConsumer) parseMessages(msgSet *MessageSet) ([]*ConsumerMe
 					timestamp = msgBlock.Msg.Timestamp
 				}
 			}
-
+			// 忽略低 offset 消息
 			if offset < child.offset {
 				continue
 			}
-
+			// 格式转换
 			messages = append(messages, &ConsumerMessage{
 				Topic:          child.topic,
 				Partition:      child.partition,
@@ -724,12 +716,9 @@ func (child *partitionConsumer) parseMessages(msgSet *MessageSet) ([]*ConsumerMe
 				Timestamp:      timestamp,
 				BlockTimestamp: msgBlock.Msg.Timestamp,
 			})
-
-
+			// 更新 offset
 			child.offset = offset + 1
 		}
-
-
 	}
 	if len(messages) == 0 {
 		child.offset++
@@ -737,34 +726,42 @@ func (child *partitionConsumer) parseMessages(msgSet *MessageSet) ([]*ConsumerMe
 	return messages, nil
 }
 
+
+// 把 RecordBatch 转换成 []*ConsumerMessage
 func (child *partitionConsumer) parseRecords(batch *RecordBatch) ([]*ConsumerMessage, error) {
 
 	messages := make([]*ConsumerMessage, 0, len(batch.Records))
 
+	// 遍历返回的记录
 	for _, rec := range batch.Records {
 
+		// 计算偏移量（相对偏移）
 		offset := batch.FirstOffset + rec.OffsetDelta
+
+		// 忽略低于待拉取偏移量的记录
 		if offset < child.offset {
 			continue
 		}
 
+		// 计算时间戳（相对偏移）
 		timestamp := batch.FirstTimestamp.Add(rec.TimestampDelta)
 		if batch.LogAppendTime {
 			timestamp = batch.MaxTimestamp
 		}
 
+		// 把 record 转换为 ConsumerMessage 对象，并保存到 massages 数组中
 		messages = append(messages, &ConsumerMessage{
-			Topic:     child.topic,
-			Partition: child.partition,
-			Key:       rec.Key,
-			Value:     rec.Value,
-			Offset:    offset,
-			Timestamp: timestamp,
-			Headers:   rec.Headers,
+			Topic:     child.topic,			// topic
+			Partition: child.partition,		// partition
+			Key:       rec.Key,				// key
+			Value:     rec.Value,			// value
+			Offset:    offset,				// 记录偏移量
+			Timestamp: timestamp,			// 记录时间戳
+			Headers:   rec.Headers,			// 记录头
 		})
 
+		// 更新 child 已拉取数据的偏移量
 		child.offset = offset + 1
-
 	}
 
 	if len(messages) == 0 {
@@ -774,6 +771,13 @@ func (child *partitionConsumer) parseRecords(batch *RecordBatch) ([]*ConsumerMes
 	return messages, nil
 }
 
+// 解析 brokerConsumer 返回的 response 数据
+//
+//	1. 从 response 取出属于 topic/partition 的块(block)数据，若不存在则报 `ErrIncompleteResponse`，若出错则报错
+//  2. 获取数据条数 nRecs
+//  3. 获取 preferredReadReplica ，当主 broker 不可用时，使用此 broker
+//  4.
+//
 func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*ConsumerMessage, error) {
 
 	var (
@@ -854,21 +858,24 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 	// abortedProducerIDs contains producerID which message should be ignored as uncommitted
 	// - producerID are added when the partitionConsumer iterate over the offset at which an aborted transaction begins (abortedTransaction.FirstOffset)
 	// - producerID are removed when partitionConsumer iterate over an aborted controlRecord, meaning the aborted transaction for this producer is over
+	//
+	//
 	abortedProducerIDs := make(map[int64]struct{}, len(block.AbortedTransactions))
 	abortedTransactions := block.getAbortedTransactions()
 
 	var messages []*ConsumerMessage
 	for _, records := range block.RecordsSet {
-
 		switch records.recordsType {
+		// 在版本 >=2 时 producer 调用 DefaultRecord 进行写数据，否则使用 LegacyRecord 进行写数据
 		case legacyRecords:
+			// 解析 messages
 			messageSetMessages, err := child.parseMessages(records.MsgSet)
 			if err != nil {
 				return nil, err
 			}
+			// 保存 messages
 			messages = append(messages, messageSetMessages...)
 		case defaultRecords:
-
 			// Consume remaining abortedTransaction up to last offset of current batch
 			for _, txn := range abortedTransactions {
 				if txn.FirstOffset > records.RecordBatch.LastOffset() {
@@ -879,6 +886,7 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 				abortedTransactions = abortedTransactions[1:]
 			}
 
+			// 解析 messages: 把 records.RecordBatch 转换成 []*ConsumerMessage
 			recordBatchMessages, err := child.parseRecords(records.RecordBatch)
 			if err != nil {
 				return nil, err
@@ -887,8 +895,14 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 			// Parse and commit offset but do not expose messages that are:
 			// - control records
 			// - part of an aborted transaction when set to `ReadCommitted`
+			//
+			// 解析和提交偏移量，但不公开以下消息:
+			//  控制记录
+			//  当设置为 “ReadCommitted” 时，部分终止的事务
+
 
 			// control record
+			// 控制记录
 			isControl, err := records.isControl()
 			if err != nil {
 				// I don't know why there is this continue in case of error to begin with
@@ -899,12 +913,12 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 				}
 				continue
 			}
+
 			if isControl {
 				controlRecord, err := records.getControlRecord()
 				if err != nil {
 					return nil, err
 				}
-
 				if controlRecord.Type == ControlRecordAbort {
 					delete(abortedProducerIDs, records.RecordBatch.ProducerID)
 				}
@@ -941,18 +955,16 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 type brokerConsumer struct {
 	consumer         *consumer
 	broker           *Broker
-	input            chan *partitionConsumer		//
-	newSubscriptions chan []*partitionConsumer
+	input            chan *partitionConsumer		// 无缓冲队列
+	newSubscriptions chan []*partitionConsumer		// 无缓冲队列
 	subscriptions    map[*partitionConsumer]none
 	wait             chan none
 	acks             sync.WaitGroup	//
 	refs             int
 }
 
-
 func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 
-	//
 	bc := &brokerConsumer{
 		consumer:         c,
 		broker:           broker,
@@ -963,7 +975,10 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
+	// 从 brokerConsumer.input 中接收新订阅的 partitionConsumer 并将其传递给 subscriptionConsumer() 协程，
+	// 并源源不断的触发 subscriptionConsumer() 协程执行消息拉取和分发逻辑。
 	go withRecover(bc.subscriptionManager)
+	// 从 brokerConsumer.newSubscriptions 中接收新加入订阅的 partitionConsumer ，执行消息拉取和分发逻辑。
 	go withRecover(bc.subscriptionConsumer)
 
 	return bc
@@ -976,10 +991,11 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 // so the main goroutine can block waiting for work if it has none.
 //
 //
+// subscriptionManager() 协程负责从 brokerConsumer.input 中接收新订阅的 partitionConsumer 并将其传递给 subscriptionConsumer() 。
 //
-// partitionConsumer 通过 brokerConsumer.input 这个 chan 加入到 brokerConsumer 的订阅中；
-// subscriptionManager() 负责从 brokerConsumer.input 中接收新订阅的 partitionConsumer 并将其传递给 subscriptionConsumer() 。
-// 可见 subscriptionConsumer 是由 subscriptionManager 驱动的。
+// subscriptionManager() 协程逻辑比较绕，是因为它不仅负责接收新订阅的 partitionConsumers 并传递给 subscriptionConsumer() 协程，
+// 还需要持续不断的触发 subscriptionConsumer() 协程去 broker 拉取消息和回调通知给各个 partitionConsumers ，而且这两个逻辑合二为一，
+// 显得比较复杂。
 //
 func (bc *brokerConsumer) subscriptionManager() {
 
@@ -987,8 +1003,13 @@ func (bc *brokerConsumer) subscriptionManager() {
 	var pcs []*partitionConsumer
 
 	for {
-
 		if len(pcs) > 0 {
+			// 如果有新订阅的 partitionSconsumers ，就将其写入到 bc.newSubscriptions 管道中。
+			// 同步写入过程:
+			// 	1. 从 input 管道中读取新加入订阅的 partitionConsumer 并缓存到本地
+			// 	2. 将已缓存的 partitionConsumers 写入 bc.newSubscriptions 管道，执行消息拉取和回调
+			// 	3. 将 none{} 对象写入到 bc.wait 管道
+			// 由于 bc.newSubscriptions 管道是无缓冲的，写入可能会发生阻塞，此时依赖 bc.wait 来同步。
 			select {
 			// 监听 bc.input 获取新加入订阅的 partitionConsumer 并保存到批量缓存中
 			case pc, ok := <-bc.input:
@@ -999,11 +1020,13 @@ func (bc *brokerConsumer) subscriptionManager() {
 			// 若没有新加入的	partitionConsumer 就把已缓存的数据发送给 subscriptionConsumer() 协程
 			case bc.newSubscriptions <- pcs:
 				pcs = nil
-			// ???
+			// [如果] 如果 bc.wait 被触发，意味着有新加入订阅的 partitionConsumers 等待写入 bc.newSubscriptions 管道，但是发生了阻塞。
 			case bc.wait <- none{}:
 			}
-
 		} else {
+			// [重要] 如果无新订阅的 partitionSconsumers ，就写入 nil 到 bc.newSubscriptions 管道中。
+			// 为何要持续不断的写入 nil 呢？目的就是触发 subscriptionConsumer() 协程不断的执行消息拉取和回调通知，
+			// 使消息不断的从 broker 拉取并发送给各个订阅的 partitionConsumers 。
 			select {
 			// 监听 bc.input 获取新加入订阅的 partitionConsumer 并保存到批量缓存中；
 			case pc, ok := <-bc.input:
@@ -1011,7 +1034,9 @@ func (bc *brokerConsumer) subscriptionManager() {
 					goto done
 				}
 				pcs = append(pcs, pc)
-			// 若没有新加入的	partitionConsumer 就把 nil 发送给 subscriptionConsumer() 协程
+			// 若没有新加入的	partitionConsumers 就把 nil 发送到 bc.newSubscriptions 管道，通知给 subscriptionConsumer() 协程，
+			// 因为 bc.newSubscriptions 管道是无缓冲的，所以当 subscriptionConsumer() 协程在执行消息拉取和分发过程中，本处写管道操作
+			// 会被阻塞，直到 subscriptionConsumer() 协程完成当前轮次的拉取和分发。
 			case bc.newSubscriptions <- nil:
 			}
 
@@ -1035,23 +1060,27 @@ done:
 // 循环发起 FetchRequest，向 broker 拉取一批消息，协调发给 partitionConsumer；
 func (bc *brokerConsumer) subscriptionConsumer() {
 
+	// 优先读取 bc.wait 管道，这意味着已经有新订阅 partitionConsumers 等待执行
 	<-bc.wait // wait for our first piece of work
 
-	// 从管道中不断获取新订阅的 partitionConsumers
+	// 从管道中不断获取新订阅的 partitionConsumers ，在 for 执行过程中，bc.newSubscriptions 会阻塞写操作，
 	for newSubscriptions := range bc.newSubscriptions {
 
 		// 更新到本地缓存中
 		bc.updateSubscriptions(newSubscriptions)
 
-		// ???
+		// 如果 bc.subscriptions 为空 ，意味着不存在正在订阅中的 partitionConsumers ，
+		// 则本 brokerConsumer 即将被关闭或者正在等待新订阅者，不需拉取消息，进入等待中。
 		if len(bc.subscriptions) == 0 {
 			// We're about to be shut down or we're about to receive more subscriptions.
 			// Either way, the signal just hasn't propagated to our goroutine yet.
+			//
+			// 如果 bc.wait 被触发，意味着在有新加入订阅的 partitionConsumers 正在等待被处理。
 			<-bc.wait
 			continue
 		}
 
-		// [核心] 从 broker 拉取消息
+		// [核心] 至此，有 partitionConsumers 正在订阅中，需要去 broker 拉取消息并回调通知给各个 partitionConsumers 。
 		response, err := bc.fetchNewMessages()
 		if err != nil {
 			Logger.Printf("consumer/broker/%d disconnecting due to error processing FetchRequest: %s\n", bc.broker.ID(), err)
@@ -1129,12 +1158,13 @@ func (bc *brokerConsumer) handleResponses() {
 		child.preferredReadReplica = -1
 
 		switch result {
-		// 消费超时，解除订阅关系
+		// 消费超时，意味着用户迟迟没有从 child.messages 管道中读取消息，解除订阅关系
 		case errTimedOut:
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because consuming was taking too long\n", bc.broker.ID(), child.topic, child.partition)
+			// 解除订阅关系，不会再拉取本 partitionConsumer 的消息和回调
 			delete(bc.subscriptions, child)
 
-		// [严重错误] offset 超过 broker 保存的范围，直接停止 partitionConsumer ，并通知错误给用户。
+		// [严重错误] offset 超过 broker 保存的范围，重试也无济于事，直接停止 partitionConsumer ，并通知错误给用户。
 		case ErrOffsetOutOfRange:
 			// there's no point in retrying this it will just fail the same way again
 			// shut it down and force the user to choose what to do
@@ -1143,24 +1173,29 @@ func (bc *brokerConsumer) handleResponses() {
 			// 把错误写入 errors 管道通知用户
 			child.sendError(result)
 			Logger.Printf("consumer/%s/%d shutting down because %s\n", child.topic, child.partition, result)
-			// close(child.trigger) 会触发 child.dispatcher() 和 child.responseFeeder() 协程退出，结束订阅。
+			// [重要] close(child.trigger) 会触发 child.dispatcher() 和 child.responseFeeder() 协程退出，结束订阅。
 			close(child.trigger)
-			// 主动结束订阅
+			// 解除订阅信息，不会再拉取本 partitionConsumer 的消息和回调
 			delete(bc.subscriptions, child)
 
-		//
+		// 服务端错误
 		case ErrUnknownTopicOrPartition, ErrNotLeaderForPartition, ErrLeaderNotAvailable, ErrReplicaNotAvailable:
 			// not an error, but does need redispatching
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because %s\n", bc.broker.ID(), child.topic, child.partition, result)
+			// 写 child.trigger 管道触发 child 重新选择 broker 并重新加入订阅
 			child.trigger <- none{}
+			// 解除订阅信息，不会再拉取本 partitionConsumer 的消息和回调
 			delete(bc.subscriptions, child)
 
-		//
+		// 其它错误
 		default:
 			// dunno, tell the user and try redispatching
+			// 将错误信息通知用户
 			child.sendError(result)
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because %s\n", bc.broker.ID(), child.topic, child.partition, result)
+			// 写 child.trigger 管道触发 child 重新选择 broker 并重新加入订阅
 			child.trigger <- none{}
+			// 解除订阅信息，不会再拉取本 partitionConsumer 的消息和回调
 			delete(bc.subscriptions, child)
 		}
 	}

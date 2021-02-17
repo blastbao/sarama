@@ -29,6 +29,8 @@ func (t *AbortedTransaction) encode(pe packetEncoder) (err error) {
 	return nil
 }
 
+
+//
 type FetchResponseBlock struct {
 	Err                  KError
 	HighWaterMarkOffset  int64
