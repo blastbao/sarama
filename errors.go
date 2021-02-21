@@ -126,18 +126,73 @@ func (err ErrReassignPartitions) Error() string {
 const (
 	ErrNoError                            KError = 0
 	ErrUnknown                            KError = -1
+
+	// 报错原因：当消费者消费 offset 大于或小于当前 kafka 集群的 offset 值时，消费会报错。
+	// 比如一个 consumer group 消费某 topic ，当 consumer group 间隔几天不消费，Kafka 内部数据会自动清除之前的数据，
+	// 程序再次启动时，会找之前消费到的 offset 进行消费，此时，若 Kafka 已经删除此 offset 值，就会产生此报错。
+	//
+	// 解决办法：换个 groupid 进行消费 。
 	ErrOffsetOutOfRange                   KError = 1
+
 	ErrInvalidMessage                     KError = 2
+
+	// 报错内容：分区不存在
+	// 原因分析：producer 向不存在的 topic 发送消息，用户可以检查 topic 是否存在或者设置 auto.create.topics.enable 参数。
 	ErrUnknownTopicOrPartition            KError = 3
+
+	// 报错内容：消息过大
+	// 原因分析：生产者端消息处理不过来了，可以增加 request.timeout.ms 减少 batch.size 。
 	ErrInvalidMessageSize                 KError = 4
+
+	// The error message shows you don't have a valid leader for the partition you are accessing.
+	// In kafka, all read/writes should go through the leader of that partition.
+	//
+	// You should make sure the topic/partitions have healthy leader first, run:
+	// kafka-topics --describe --zookeeper <zk_url, put /chroot if you have any> --topic <topic_name>
+	//
+	// 报错内容：leader不可用
+	// 原因分析：原因很多，topic 正在被删除、正在进行leader选举...
+	// 解决方法：可使用 kafka-topics 脚本检查 leader 信息，进而检查 broker 的存活情况，尝试重启解决。
 	ErrLeaderNotAvailable                 KError = 5
+
+	// Each topic is served by one or multiple Brokers - one is leader and the remaining brokers are followers.
+	// A producer needs to send new messages to the leader Broker which internally replicate the data to all followers.
+	// I assume, that your producer client does not connect to the correct Broker,
+	// its connect to a follower instead of the leader, and this follower rejects your send request.
+	//
+	// Try to run:
+	// 	./kafka-topics.sh --zookeeper localhost:2181 --topic your_topic --describe
+	//
+	// Output:
+	// 	Topic: your_topic   PartitionCount:3    ReplicationFactor:1 Configs:retention.ms=14400000
+	//	Topic: your_topic   Partition: 0    	Leader: 2  			Replicas: 2 Isr: 2
+	//	Topic: your_topic   Partition: 1    	Leader: 0   		Replicas: 0 Isr: 0
+	//	Topic: your_topic   Partition: 2    	Leader: 1   		Replicas: 1 Isr: 1
+	//
+	// In this example you can see that your_topic have 3 partitions meaning all 3 brokers are leaders
+	// of that topic each on different partition,
+	// s.t broker 2 is leader on partition 0 and broker 0 and broker 1 are followers on partition 0.
+	//
+	// Generally, with retry > 0 producer should be able to find the correct leader in the subsequent retries.
+	//
+	//
+	// 报错内容：broker 已经不是对应 partition 的 leader 了
+	// 原因分析：发生在 leader 变更时，当 leader 从一个 broker 切换到另一个 broker 时，要分析什么原因引起了 leader 的切换。
 	ErrNotLeaderForPartition              KError = 6
+
+	// 报错内容：请求超时
+	// 原因分析：观察哪里抛出的，观察网络是否能通，如果可以通，可以考虑增加 request.timeout.ms 的值。
 	ErrRequestTimedOut                    KError = 7
+
+	//
 	ErrBrokerNotAvailable                 KError = 8
 	ErrReplicaNotAvailable                KError = 9
 	ErrMessageSizeTooLarge                KError = 10
 	ErrStaleControllerEpochCode           KError = 11
 	ErrOffsetMetadataTooLarge             KError = 12
+
+	// 报错内容：网络异常
+	// 原因分析：网络连接中断，检查 broker 的网络情况
 	ErrNetworkException                   KError = 13
 	ErrOffsetsLoadInProgress              KError = 14
 	ErrConsumerCoordinatorNotAvailable    KError = 15
@@ -147,7 +202,12 @@ const (
 	ErrNotEnoughReplicas                  KError = 19
 	ErrNotEnoughReplicasAfterAppend       KError = 20
 	ErrInvalidRequiredAcks                KError = 21
+
+	// 报错内容：无效的“代”
+	// 原因分析：consumer 错过了 rebalance ，原因是 consumer 花了大量时间处理数据。
+	// 需要适当减少 max.poll.records 值，增加 max.poll.interval.ms 或者想办法增加消息处理的速度。
 	ErrIllegalGeneration                  KError = 22
+
 	ErrInconsistentGroupProtocol          KError = 23
 	ErrInvalidGroupId                     KError = 24
 	ErrUnknownMemberId                    KError = 25

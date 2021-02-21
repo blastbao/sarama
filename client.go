@@ -188,6 +188,7 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 			break
 		case ErrLeaderNotAvailable, ErrReplicaNotAvailable, ErrTopicAuthorizationFailed, ErrClusterAuthorizationFailed:
 			// indicates that maybe part of the cluster is down, but is not fatal to creating the client
+			// 表明 kafka 集群中部分节点可能宕机，但不会对创建客户端造成严重影响。
 			Logger.Println(err)
 		default:
 			close(client.closed) // we haven't started the background updater yet, so we have to do this manually
@@ -619,6 +620,7 @@ func (client *client) RefreshCoordinator(consumerGroup string) error {
 		return ErrClosedClient
 	}
 
+	// [rpc] 查找消费组 consumerGroup 的协调者 coordinator broker 信息
 	response, err := client.getConsumerMetadata(consumerGroup, client.conf.Metadata.Retry.Max)
 	if err != nil {
 		return err
@@ -626,7 +628,10 @@ func (client *client) RefreshCoordinator(consumerGroup string) error {
 
 	client.lock.Lock()
 	defer client.lock.Unlock()
+
+	// 把新的 Coordinator Broker 保存到 client.brokers[brokerId]*Broker 中
 	client.registerBroker(response.Coordinator)
+	// 把新的 Coordinator Broker 保存到 client.coordinators[consumerGroup]BrokerId 中
 	client.coordinators[consumerGroup] = response.Coordinator.ID()
 	return nil
 }
@@ -1047,6 +1052,7 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 	//
 	client.updateBroker(data.Brokers)
 
+
 	client.controllerID = data.ControllerID
 
 	if allKnownMetaData {
@@ -1130,8 +1136,10 @@ func (client *client) computeBackoff(attemptsRemaining int) time.Duration {
 	return client.conf.Metadata.Retry.Backoff
 }
 
+// 查找消费组 consumerGroup 的协调者 broker 信息
 func (client *client) getConsumerMetadata(consumerGroup string, attemptsRemaining int) (*FindCoordinatorResponse, error) {
 
+	// 出错重试
 	retry := func(err error) (*FindCoordinatorResponse, error) {
 		if attemptsRemaining > 0 {
 			backoff := client.computeBackoff(attemptsRemaining)
@@ -1142,36 +1150,40 @@ func (client *client) getConsumerMetadata(consumerGroup string, attemptsRemainin
 		return nil, err
 	}
 
+	// 选择一个可用的 broker 发送请求
 	for broker := client.any(); broker != nil; broker = client.any() {
+
 		Logger.Printf("client/coordinator requesting coordinator for consumergroup %s from %s\n", consumerGroup, broker.Addr())
 
-		request := new(FindCoordinatorRequest)
-		request.CoordinatorKey = consumerGroup
-		request.CoordinatorType = CoordinatorGroup
+		// 构造请求
+		request := new(FindCoordinatorRequest)		// 查找协调者请求
+		request.CoordinatorKey = consumerGroup		// 协调者键: 消费组 ID 、 事务 ID
+		request.CoordinatorType = CoordinatorGroup	// 协调者类型: 消费组协调者、事务协调者
 
+		// 发送请求，获取响应
 		response, err := broker.FindCoordinator(request)
 
+		// 错误检查
 		if err != nil {
 			Logger.Printf("client/coordinator request to broker %s failed: %s\n", broker.Addr(), err)
-
 			switch err.(type) {
-			case PacketEncodingError:
+			case PacketEncodingError:	// 编码错误
 				return nil, err
-			default:
-				_ = broker.Close()
-				client.deregisterBroker(broker)
-				continue
+			default:					// 其它错误
+				_ = broker.Close()					// 关闭 broker
+				client.deregisterBroker(broker)		// 移除 broker
+				continue							// 重试
 			}
 		}
 
 		switch response.Err {
+		// 请求成功，直接返回
 		case ErrNoError:
 			Logger.Printf("client/coordinator coordinator for consumergroup %s is #%d (%s)\n", consumerGroup, response.Coordinator.ID(), response.Coordinator.Addr())
 			return response, nil
-
+		// ???
 		case ErrConsumerCoordinatorNotAvailable:
 			Logger.Printf("client/coordinator coordinator for consumer group %s is not available\n", consumerGroup)
-
 			// This is very ugly, but this scenario will only happen once per cluster.
 			// The __consumer_offsets topic only has to be created one time.
 			// The number of partitions not configurable, but partition 0 should always exist.
@@ -1179,12 +1191,12 @@ func (client *client) getConsumerMetadata(consumerGroup string, attemptsRemainin
 				Logger.Printf("client/coordinator the __consumer_offsets topic is not initialized completely yet. Waiting 2 seconds...\n")
 				time.Sleep(2 * time.Second)
 			}
-
-			return retry(ErrConsumerCoordinatorNotAvailable)
+			return retry(ErrConsumerCoordinatorNotAvailable)	// 重试
+		// 鉴权错误
 		case ErrGroupAuthorizationFailed:
 			Logger.Printf("client was not authorized to access group %s while attempting to find coordinator", consumerGroup)
-			return retry(ErrGroupAuthorizationFailed)
-
+			return retry(ErrGroupAuthorizationFailed)	// 重试
+		// 其它错误，直接报错
 		default:
 			return nil, response.Err
 		}

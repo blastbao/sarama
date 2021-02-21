@@ -420,7 +420,7 @@ func (child *partitionConsumer) sendError(err error) {
 // 计算退让时间间隔，控制读取分区失败后，等待多长时间才能再次尝试(默认为2s)。
 func (child *partitionConsumer) computeBackoff() time.Duration {
 
-	// 用来动态计算回退时间。
+	// 动态计算回退时间
 	if child.conf.Consumer.Retry.BackoffFunc != nil {
 		// 增加重试次数
 		retries := atomic.AddInt32(&child.retries, 1)
@@ -461,7 +461,7 @@ func (child *partitionConsumer) dispatcher() {
 			// 重新选择一个可用的 broker 并加入订阅，如果出错，则写入 errors 管道通知用户，并写入 trigger 管道触发延迟重试
 			if err := child.dispatch(); err != nil {
 				child.sendError(err)
-				child.trigger <- none{}
+				child.trigger <- none{} // 重新写 trigger 管道，触发延迟重试
 			}
 		}
 
@@ -519,6 +519,7 @@ func (child *partitionConsumer) dispatch() error {
 	return nil
 }
 
+// 检查待消费的 offset 是否在合法的 offset 区间中，因为 broker 可能会清除过期的 offset 信息，导致本地记录的 offset 失效。
 func (child *partitionConsumer) chooseStartingOffset(offset int64) error {
 
 	// 获取最新 offset
@@ -538,10 +539,11 @@ func (child *partitionConsumer) chooseStartingOffset(offset int64) error {
 		child.offset = newestOffset
 	case offset == OffsetOldest:
 		child.offset = oldestOffset
+	// 待消费的 offset 在合法区间中，则可以正常消费。
 	case offset >= oldestOffset && offset <= newestOffset:
 		child.offset = offset
+	// 待消费的 offset 不在合法区间，报错 OutOfRange	。
 	default:
-		// 如果 offset 超过区间，报错 OutOfRange
 		return ErrOffsetOutOfRange
 	}
 

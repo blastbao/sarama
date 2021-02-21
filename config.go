@@ -36,6 +36,7 @@ type Config struct {
 	// Net is the namespace for network-level properties used by the Broker, and
 	// shared by the Client/Producer/Consumer.
 	Net struct {
+
 		// How many outstanding requests a connection is allowed to have before
 		// sending on it blocks (default 5).
 		MaxOpenRequests int
@@ -308,6 +309,7 @@ type Config struct {
 			BackoffFunc func(retries int) time.Duration
 		}
 
+
 		// Fetch is the namespace for controlling how many bytes are retrieved by any
 		// given request.
 		Fetch struct {
@@ -330,6 +332,8 @@ type Config struct {
 			// global `sarama.MaxResponseSize` still applies.
 			Max int32
 		}
+
+
 		// The maximum amount of time the broker will wait for Consumer.Fetch.Min
 		// bytes to become available before it returns fewer than that anyways. The
 		// default is 250ms, since 0 causes the consumer to spin when no events are
@@ -369,24 +373,36 @@ type Config struct {
 		// offsets. This currently requires the manual use of an OffsetManager
 		// but will eventually be automated.
 		Offsets struct {
+
 			// Deprecated: CommitInterval exists for historical compatibility
 			// and should not be used. Please use Consumer.Offsets.AutoCommit
+			//
+			// CommitInterval 的存在是为了历史兼容性，不应该被使用，请使用 Consumer.Offsets.AutoCommit 。
 			CommitInterval time.Duration
 
 			// AutoCommit specifies configuration for commit messages automatically.
+			// 自动提交
 			AutoCommit struct {
 				// Whether or not to auto-commit updated offsets back to the broker.
 				// (default enabled).
+				//
+				// 是否开启自动提交（默认开启）
 				Enable bool
 
 				// How frequently to commit updated offsets. Ineffective unless
 				// auto-commit is enabled (default 1s)
+				//
+				// 自动提交时间间隔（默认 1s）
 				Interval time.Duration
 			}
 
 			// The initial offset to use if no offset was previously committed.
 			// Should be OffsetNewest or OffsetOldest. Defaults to OffsetNewest.
+			//
+			// 如果此前没有提交偏移量，则使用 Initial 值作为初始偏移量。
+			// 值为 OffsetLatest 或 OffsetOldest ，默认为 OffsetNewest 。
 			Initial int64
+
 
 			// The retention duration for committed offsets. If zero, disabled
 			// (in which case the `offsets.retention.minutes` option on the
@@ -394,6 +410,34 @@ type Config struct {
 			// milliseconds; nanoseconds will be truncated. Requires Kafka
 			// broker version 0.9.0 or later.
 			// (default is 0: disabled).
+			//
+			// committed offsets 的保留期限。
+			// 如果为 0 ，则禁用，在此情况下，将使用 broker 上的 `offsets.retention.minutes` 选项。
+			// Kafka 只支持毫秒级精度，纳秒将被截断。
+			// 要求 Kafka broker 版本为 0.9.0 或更高。(默认为0：禁用)。
+			//
+			//
+			// Kafka, by default deletes committed offsets after a configurable period of time.
+			// See parameter offsets.retention.minutes.
+			// Ie, if a consumer group is inactive (ie, does not commit any offsets) for this amount of time,
+			// the offsets get deleted. Thus, even if the consumer is running, if it does not commit offsets
+			// for some partitions, those offsets are subject to offset.retention.minutes.
+			//
+			// If you start a consumer, the following happens:
+			//
+			//	1. look for a (valid) committed offset (for the consumer group)
+			//		1.1 if valid offset is found, resume from there
+			//		1.2 if no valid offset is found, reset offset according to auto.offset.reset parameter
+			//
+			// Thus, if your offsets got deleted and auto.offset.reset = latest, you consumer will not poll
+			// anything until new data is added to the topic.
+			//
+			// If auto.offset.reset = earliest it should consume the whole topic.
+			//
+			//
+			// The default value of `offsets.retention.minutes` is 24 hours.
+			// After the retention period all the existing offsets will be deleted from the broker due to avoid overflow of the space.
+			// So the previous committed offset will be changed to latest offset as the previous offset has been removed by Kafka/Zookeeper.
 			Retention time.Duration
 
 			Retry struct {
@@ -403,10 +447,16 @@ type Config struct {
 			}
 		}
 
+
 		// IsolationLevel support 2 mode:
 		// 	- use `ReadUncommitted` (default) to consume and return all messages in message channel
 		//	- use `ReadCommitted` to hide messages that are part of an aborted transaction
+		//
+		// 隔离级别，支持两种模式
+		//  - 读未提交(默认):
+		//  - 读已提及
 		IsolationLevel IsolationLevel
+
 
 		// Interceptors to be called just before the record is sent to the
 		// messages channel. Interceptors allows to intercept and possible
@@ -421,15 +471,21 @@ type Config struct {
 	// debugging, and auditing purposes. Defaults to "sarama", but you should
 	// probably set it to something specific to your application.
 	ClientID string
+
+
 	// A rack identifier for this client. This can be any string value which
 	// indicates where this client is physically located.
 	// It corresponds with the broker config 'broker.rack'
 	RackID string
+
+
 	// The number of events to buffer in internal and external channels. This
 	// permits the producer and consumer to continue processing some messages
 	// in the background while user code is working, greatly improving throughput.
 	// Defaults to 256.
 	ChannelBufferSize int
+
+
 	// The version of Kafka that Sarama will assume it is running against.
 	// Defaults to the oldest supported stable version. Since Kafka provides
 	// backwards-compatibility, setting it to a version older than you have
@@ -437,6 +493,8 @@ type Config struct {
 	// latest features. Setting it to a version greater than you are actually
 	// running may lead to random breakage.
 	Version KafkaVersion
+
+
 	// The registry to define metrics into.
 	// Defaults to a local registry.
 	// If you want to disable metrics gathering, set "metrics.UseNilMetrics" to "true"

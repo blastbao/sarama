@@ -905,12 +905,12 @@ type consumerGroupClaim struct {
 
 func newConsumerGroupClaim(sess *consumerGroupSession, topic string, partition int32, offset int64) (*consumerGroupClaim, error) {
 
-	//
+	// 创建一个 PartitionConsumer 来消费消息
 	pcm, err := sess.parent.consumer.ConsumePartition(topic, partition, offset)
 	if err == ErrOffsetOutOfRange {
-		//
+		// 如果待消费的 offset 不在合法的 offset 区间中，因为 broker 可能会清除过期的 offset 信息，导致本地记录的 offset 失效。
+		// 此时，需要重置待消费的 offset 为 OffsetLatest 或 OffsetOldest，然后重新启动消费。
 		offset = sess.parent.config.Consumer.Offsets.Initial
-		//
 		pcm, err = sess.parent.consumer.ConsumePartition(topic, partition, offset)
 	}
 	if err != nil {

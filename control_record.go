@@ -15,11 +15,15 @@ const (
 // Control records are returned as a record by fetchRequest
 // However unlike "normal" records, they mean nothing application wise.
 // They only serve internal logic for supporting transactions.
+//
+// 控制记录也是通过 fetchRequest 请求返回的，然而，与 “普通” 记录不同的是，
+// 控制记录只服务于事务的内部逻辑。
 type ControlRecord struct {
 	Version          int16
 	CoordinatorEpoch int32
 	Type             ControlRecordType
 }
+
 
 func (cr *ControlRecord) decode(key, value packetDecoder) error {
 	var err error

@@ -8,22 +8,37 @@ import (
 // Offset Manager
 
 // OffsetManager uses Kafka to store and fetch consumed partition offsets.
+//
+// OffsetManager 使用 Kafka 来存储和获取消费的分区偏移量。
 type OffsetManager interface {
+
 	// ManagePartition creates a PartitionOffsetManager on the given topic/partition.
 	// It will return an error if this OffsetManager is already managing the given
 	// topic/partition.
+	//
+	// ManagePartition 在给定的 topic/partition 上创建一个 PartitionOffsetManager 。
+	// 如果对应的 PartitionOffsetManager 已经存在，将返回一个错误。
 	ManagePartition(topic string, partition int32) (PartitionOffsetManager, error)
 
 	// Close stops the OffsetManager from managing offsets. It is required to call
 	// this function before an OffsetManager object passes out of scope, as it
 	// will otherwise leak memory. You must call this after all the
 	// PartitionOffsetManagers are closed.
+	//
+	// Close() 停止 OffsetManager 。
+	// 在 OffsetManager 对象离开作用域之前必须调用这个函数，否则会泄漏内存。
+	// 您必须在所有的 PartitionOffsetManagers 关闭后调用这个函数。
 	Close() error
 
 	// Commit commits the offsets. This method can be used if AutoCommit.Enable is
 	// set to false.
+	//
+	// Commit 提交偏移量。
+	// 如果 AutoCommit.Enable 被设置为 false ，则可以使用本方法手动提交。
 	Commit()
 }
+
+
 
 type offsetManager struct {
 	client Client
@@ -45,6 +60,8 @@ type offsetManager struct {
 	closed    chan none
 }
 
+
+
 // NewOffsetManagerFromClient creates a new OffsetManager from the given client.
 // It is still necessary to call Close() on the underlying client when finished with the partition manager.
 func NewOffsetManagerFromClient(group string, client Client) (OffsetManager, error) {
@@ -59,6 +76,7 @@ func newOffsetManagerFromClient(group, memberID string, generation int32, client
 
 	conf := client.Config()
 	om := &offsetManager{
+
 		client: client,
 		conf:   conf,
 		group:  group,
@@ -70,6 +88,8 @@ func newOffsetManagerFromClient(group, memberID string, generation int32, client
 		closing: make(chan none),
 		closed:  make(chan none),
 	}
+
+	// 如果开启自动提交，就按照配置的时间间隔启动定时提交协程。
 	if conf.Consumer.Offsets.AutoCommit.Enable {
 		om.ticker = time.NewTicker(conf.Consumer.Offsets.AutoCommit.Interval)
 		go withRecover(om.mainLoop)
@@ -79,6 +99,7 @@ func newOffsetManagerFromClient(group, memberID string, generation int32, client
 }
 
 func (om *offsetManager) ManagePartition(topic string, partition int32) (PartitionOffsetManager, error) {
+
 	pom, err := om.newPartitionOffsetManager(topic, partition)
 	if err != nil {
 		return nil, err
@@ -139,58 +160,74 @@ func (om *offsetManager) computeBackoff(retries int) time.Duration {
 }
 
 func (om *offsetManager) fetchInitialOffset(topic string, partition int32, retries int) (int64, string, error) {
+
+	// 根据 om.group 获取消费组的 coordinator broker
 	broker, err := om.coordinator()
 	if err != nil {
 		if retries <= 0 {
 			return 0, "", err
 		}
+		// 递归重试
 		return om.fetchInitialOffset(topic, partition, retries-1)
 	}
 
+	// 构造获取 offset 请求
 	req := new(OffsetFetchRequest)
-	req.Version = 1
-	req.ConsumerGroup = om.group
-	req.AddPartition(topic, partition)
+	req.Version = 1						// 版本号
+	req.ConsumerGroup = om.group		// 消费组
+	req.AddPartition(topic, partition)	// topic/partition
 
+	// 发送请求到 broker
 	resp, err := broker.FetchOffset(req)
 	if err != nil {
 		if retries <= 0 {
 			return 0, "", err
 		}
 		om.releaseCoordinator(broker)
+		// 递归重试
 		return om.fetchInitialOffset(topic, partition, retries-1)
 	}
 
+	// 解析响应
 	block := resp.GetBlock(topic, partition)
 	if block == nil {
 		return 0, "", ErrIncompleteResponse
 	}
 
+	// 错误检查
 	switch block.Err {
+	// 请求成功
 	case ErrNoError:
 		return block.Offset, block.Metadata, nil
+	// 请求的 broker 非本 group 的 coordinator
 	case ErrNotCoordinatorForConsumer:
 		if retries <= 0 {
 			return 0, "", block.Err
 		}
 		om.releaseCoordinator(broker)
+		// 递归重试
 		return om.fetchInitialOffset(topic, partition, retries-1)
+	// 获取 offset 的请求正在执行中
 	case ErrOffsetsLoadInProgress:
 		if retries <= 0 {
 			return 0, "", block.Err
 		}
+		// 等待一段时间后重试
 		backoff := om.computeBackoff(retries)
 		select {
 		case <-om.closing:
 			return 0, "", block.Err
 		case <-time.After(backoff):
 		}
+		// 递归重试
 		return om.fetchInitialOffset(topic, partition, retries-1)
+	// 其它错误
 	default:
 		return 0, "", block.Err
 	}
 }
 
+// 根据 om.group 获取消费组的 coordinator broker
 func (om *offsetManager) coordinator() (*Broker, error) {
 	om.brokerLock.RLock()
 	broker := om.broker
@@ -207,15 +244,18 @@ func (om *offsetManager) coordinator() (*Broker, error) {
 		return broker, nil
 	}
 
+	// 刷新 group 的 coordinator broker
 	if err := om.client.RefreshCoordinator(om.group); err != nil {
 		return nil, err
 	}
 
+	// 获取 group 的 coordinator broker
 	broker, err := om.client.Coordinator(om.group)
 	if err != nil {
 		return nil, err
 	}
 
+	// 保存 broker
 	om.broker = broker
 	return broker, nil
 }
@@ -228,37 +268,43 @@ func (om *offsetManager) releaseCoordinator(b *Broker) {
 	om.brokerLock.Unlock()
 }
 
+// 定时提交 offsets 协程
 func (om *offsetManager) mainLoop() {
-	defer om.ticker.Stop()
-	defer close(om.closed)
+	defer om.ticker.Stop()	// 结束定时器
+	defer close(om.closed)	// 关闭完成
 
 	for {
 		select {
-		case <-om.ticker.C:
+		case <-om.ticker.C: // 定时提交 offsets 的间隔
 			om.Commit()
-		case <-om.closing:
+		case <-om.closing:	// 关闭信号
 			return
 		}
 	}
 }
 
+// 提交 offsets 到 broker
 func (om *offsetManager) Commit() {
 	om.flushToBroker()
 	om.releasePOMs(false)
 }
 
 func (om *offsetManager) flushToBroker() {
+
+	// 构造 OffsetCommitRequest 请求对象
 	req := om.constructRequest()
 	if req == nil {
 		return
 	}
 
+	// 根据 om.group 获取消费组的 coordinator broker
 	broker, err := om.coordinator()
 	if err != nil {
 		om.handleError(err)
 		return
 	}
 
+	// 发送提交 offset 的请求到 coordinator broker
 	resp, err := broker.CommitOffset(req)
 	if err != nil {
 		om.handleError(err)
@@ -267,36 +313,43 @@ func (om *offsetManager) flushToBroker() {
 		return
 	}
 
+	// 处理提交的响应
 	om.handleResponse(broker, req, resp)
 }
 
 func (om *offsetManager) constructRequest() *OffsetCommitRequest {
 	var r *OffsetCommitRequest
 	var perPartitionTimestamp int64
+
+	// 如果没有设置 retention
 	if om.conf.Consumer.Offsets.Retention == 0 {
 		perPartitionTimestamp = ReceiveTime
 		r = &OffsetCommitRequest{
-			Version:                 1,
-			ConsumerGroup:           om.group,
-			ConsumerID:              om.memberID,
-			ConsumerGroupGeneration: om.generation,
+			Version:                 1,				// 版本号
+			ConsumerGroup:           om.group,		// 消费组
+			ConsumerID:              om.memberID,	// 消费组成员 ID
+			ConsumerGroupGeneration: om.generation,	// 消费组选举期号
 		}
 	} else {
 		r = &OffsetCommitRequest{
-			Version:                 2,
-			RetentionTime:           int64(om.conf.Consumer.Offsets.Retention / time.Millisecond),
-			ConsumerGroup:           om.group,
-			ConsumerID:              om.memberID,
-			ConsumerGroupGeneration: om.generation,
+			Version:                 2,				// 版本号
+			RetentionTime:           int64(om.conf.Consumer.Offsets.Retention / time.Millisecond), // offset retention 时长
+			ConsumerGroup:           om.group,		// 消费组
+			ConsumerID:              om.memberID,	// 消费组成员 ID
+			ConsumerGroupGeneration: om.generation, // 消费组选举期号
 		}
 	}
+
 
 	om.pomsLock.RLock()
 	defer om.pomsLock.RUnlock()
 
+	// 遍历 topics
 	for _, topicManagers := range om.poms {
+		// 遍历 partitions
 		for _, pom := range topicManagers {
 			pom.lock.Lock()
+			// 如果 offsets 有变更，就写入到 req 中
 			if pom.dirty {
 				r.AddBlock(pom.topic, pom.partition, pom.offset, perPartitionTimestamp, pom.metadata)
 			}
@@ -312,11 +365,14 @@ func (om *offsetManager) constructRequest() *OffsetCommitRequest {
 }
 
 func (om *offsetManager) handleResponse(broker *Broker, req *OffsetCommitRequest, resp *OffsetCommitResponse) {
+
 	om.pomsLock.RLock()
 	defer om.pomsLock.RUnlock()
 
 	for _, topicManagers := range om.poms {
 		for _, pom := range topicManagers {
+
+
 			if req.blocks[pom.topic] == nil || req.blocks[pom.topic][pom.partition] == nil {
 				continue
 			}
@@ -337,11 +393,14 @@ func (om *offsetManager) handleResponse(broker *Broker, req *OffsetCommitRequest
 			case ErrNoError:
 				block := req.blocks[pom.topic][pom.partition]
 				pom.updateCommitted(block.offset, block.metadata)
-			case ErrNotLeaderForPartition, ErrLeaderNotAvailable,
-				ErrConsumerCoordinatorNotAvailable, ErrNotCoordinatorForConsumer:
+			case ErrNotLeaderForPartition,
+				 ErrLeaderNotAvailable,
+				 ErrConsumerCoordinatorNotAvailable,
+				 ErrNotCoordinatorForConsumer:
 				// not a critical error, we just need to redispatch
 				om.releaseCoordinator(broker)
-			case ErrOffsetMetadataTooLarge, ErrInvalidCommitOffsetSize:
+			case ErrOffsetMetadataTooLarge,
+				 ErrInvalidCommitOffsetSize:
 				// nothing we can do about this, just tell the user and carry on
 				pom.handleError(err)
 			case ErrOffsetsLoadInProgress:
@@ -487,10 +546,12 @@ type partitionOffsetManager struct {
 	done     bool
 
 	releaseOnce sync.Once
-	errors      chan *ConsumerError
+	errors      chan *ConsumerError	//
 }
 
 func (om *offsetManager) newPartitionOffsetManager(topic string, partition int32) (*partitionOffsetManager, error) {
+
+	// 根据 om.group 获取消费组的 coordinator broker，然后发送请求获取消费组 group 在 topic/partition 下消费的 offset 。
 	offset, metadata, err := om.fetchInitialOffset(topic, partition, om.conf.Metadata.Retry.Max)
 	if err != nil {
 		return nil, err
